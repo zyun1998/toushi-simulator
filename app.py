@@ -1,3 +1,7 @@
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import base64
 import json
 import os
@@ -8,30 +12,8 @@ import streamlit as st
 from src.ai_service import answer_followup_question, generate_result_explanation
 from src.calculator import SimulationInput, simulate_monthly_investment
 from src.charts import create_asset_chart
-
-SCENARIO_CONFIG = {
-    "bull": {
-        "label": "上昇相場",
-        "annual_return": 0.08,
-        "crash_year": None,
-        "crash_rate": None,
-        "description": "前向きな成長を想定したシナリオです。",
-    },
-    "base": {
-        "label": "平均",
-        "annual_return": 0.05,
-        "crash_year": None,
-        "crash_rate": None,
-        "description": "標準的な前提で試算するシナリオです。",
-    },
-    "bear": {
-        "label": "下落相場",
-        "annual_return": 0.03,
-        "crash_year": 3,
-        "crash_rate": -0.30,
-        "description": "途中の下落も考慮した慎重なシナリオです。",
-    },
-}
+from src.product_config import PRODUCT_CONFIG, get_product_description, get_product_label
+from src.scenario_builder import build_scenarios
 
 LOGO_PATH = "assets/logo.png"
 QA_IMAGE_PATH = "assets/QA.png"
@@ -100,7 +82,6 @@ header[data-testid="stHeader"] {{
     position: relative;
 }}
 
-/* 배경 구석의 은은한 발자국 */
 .stApp::before {{
     content: "";
     position: fixed;
@@ -343,7 +324,6 @@ div[data-baseweb="textarea"] > div {{
     border-width: 1px !important;
 }}
 
-/* 채팅 말풍선 */
 [data-testid="stChatMessage"] {{
     align-items: flex-start;
     margin-bottom: 0.6rem;
@@ -354,9 +334,6 @@ div[data-baseweb="textarea"] > div {{
     font-size: 1rem;
     margin-bottom: 0;
 }}
-
-    min-height: 48px;   /* 높이 살짝 안정 */
-
 
 @media (max-width: 900px) {{
     .topbar-logo {{
@@ -386,9 +363,7 @@ if "chat_messages" not in st.session_state:
 if "last_simulation_key" not in st.session_state:
     st.session_state.last_simulation_key = None
 
-# -----------------------------
-# Top logo area
-# -----------------------------
+
 if logo_base64:
     st.markdown(
         f"""
@@ -409,9 +384,6 @@ else:
         unsafe_allow_html=True,
     )
 
-# -----------------------------
-# Hero
-# -----------------------------
 st.markdown('<div class="hero-wrap">', unsafe_allow_html=True)
 st.markdown('<div style="text-align:center;">', unsafe_allow_html=True)
 st.markdown('<div class="hero-badge">やさしく見える、未来のお金</div>', unsafe_allow_html=True)
@@ -419,8 +391,8 @@ st.markdown('<div class="hero-title">NISA投資シミュレーター</div>', uns
 st.markdown(
     """
     <div class="hero-subtitle">
-        毎月の積立金額・投資期間・市場シナリオをもとに、将来の資産推移をわかりやすく確認できます。<br>
-        結果の意味は、ワンコサポートがやさしく解説します。
+        毎月の積立金額・投資期間・商品・市場シナリオをもとに、将来の資産推移をわかりやすく確認できます。<br>
+        固定前提だけでなく、商品の過去データをもとにした自動シナリオも選べます。
     </div>
     """,
     unsafe_allow_html=True,
@@ -428,9 +400,6 @@ st.markdown(
 st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# -----------------------------
-# Input area
-# -----------------------------
 st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 st.markdown('<div class="section-title">シミュレーション条件</div>', unsafe_allow_html=True)
 
@@ -441,21 +410,38 @@ with col_input_left:
         "毎月の投資額（円）",
         min_value=1000,
         value=100000,
-        step=1000
+        step=1000,
     )
 
     years = st.slider(
         "投資期間（年）",
         min_value=1,
         max_value=40,
-        value=15
+        value=15,
+    )
+
+    product_code = st.selectbox(
+        "商品選択",
+        options=list(PRODUCT_CONFIG.keys()),
+        format_func=lambda x: PRODUCT_CONFIG[x]["label_ja"],
     )
 
 with col_input_right:
+    scenario_mode = st.radio(
+        "シナリオ生成方式",
+        options=["fixed", "market_auto"],
+        format_func=lambda x: "基本値を使用" if x == "fixed" else "商品の過去データから自動計算",
+        index=0,
+    )
+
     scenario = st.selectbox(
         "市場シナリオ",
         options=["bull", "base", "bear"],
-        format_func=lambda x: SCENARIO_CONFIG[x]["label"]
+        format_func=lambda x: {
+            "bull": "上昇相場",
+            "base": "平均",
+            "bear": "下落相場",
+        }[x],
     )
 
     language = st.radio(
@@ -465,60 +451,103 @@ with col_input_right:
         index=0,
     )
 
-st.caption(
-    f"選択中のシナリオ：{SCENARIO_CONFIG[scenario]['label']} / "
-    f"{SCENARIO_CONFIG[scenario]['description']}"
-)
+product_label = get_product_label(product_code, language)
+product_desc = get_product_description(product_code, language)
+
+st.caption(f"選択中の商品：{product_label} / {product_desc}")
+st.markdown('</div>', unsafe_allow_html=True)
+
+scenario_build = None
+scenario_error = None
+
+try:
+    scenario_build = build_scenarios(
+        product_code=product_code,
+        scenario_mode=scenario_mode,
+        period_years=10,
+    )
+except Exception as e:
+    scenario_error = str(e)
+    try:
+        scenario_build = build_scenarios(
+            product_code=product_code,
+            scenario_mode="fixed",
+            period_years=10,
+        )
+    except Exception:
+        scenario_build = None
+
+st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+st.markdown('<div class="section-title">基準情報</div>', unsafe_allow_html=True)
+
+if scenario_build is not None:
+    benchmark_info = scenario_build.benchmark_info
+    st.write(f"**基準商品**: {benchmark_info['benchmark_ticker']}")
+    st.write(f"**データ期間**: 直近 {benchmark_info['period_years']} 年")
+    st.write(f"**計算方式**: {benchmark_info['calculation_method']}")
+    if scenario_error and scenario_mode == "market_auto":
+        st.warning(f"市場データ取得に失敗したため、固定シナリオへ切り替えました。詳細: {scenario_error}")
+    st.info(benchmark_info["warning_note"])
+else:
+    st.error("基準情報を表示できません。")
 
 run_button = st.button("シミュレーション実行")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# -----------------------------
-# Run simulation
-# -----------------------------
 if run_button:
-    config = SCENARIO_CONFIG[scenario]
+    if scenario_build is None:
+        st.error("シナリオ情報の生成に失敗したため、シミュレーションを実行できません。")
+    else:
+        config = scenario_build.scenarios[scenario]
+        benchmark_info = scenario_build.benchmark_info
 
-    sim_input = SimulationInput(
-        monthly_amount=int(monthly_amount),
-        years=years,
-        annual_return=config["annual_return"],
-        scenario=scenario,
-        crash_year=config["crash_year"],
-        crash_rate=config["crash_rate"],
-    )
+        sim_input = SimulationInput(
+            monthly_amount=int(monthly_amount),
+            years=years,
+            annual_return=config["annual_return"],
+            scenario=scenario,
+            crash_year=config["crash_year"],
+            crash_rate=config["crash_rate"],
+            product_code=product_code,
+            product_label=product_label,
+            scenario_mode=scenario_mode if scenario_error is None else "fixed",
+            benchmark_ticker=benchmark_info["benchmark_ticker"],
+            period_years=benchmark_info["period_years"],
+            calculation_method=benchmark_info["calculation_method"],
+            warning_note=benchmark_info["warning_note"],
+        )
 
-    result = simulate_monthly_investment(sim_input)
-    st.session_state.result = result
+        result = simulate_monthly_investment(sim_input)
+        st.session_state.result = result
 
-    simulation_key = json.dumps(
-        {
-            "monthly_amount": int(monthly_amount),
-            "years": years,
-            "scenario": scenario,
-            "language": language,
-        },
-        sort_keys=True,
-        ensure_ascii=False,
-    )
+        simulation_key = json.dumps(
+            {
+                "monthly_amount": int(monthly_amount),
+                "years": years,
+                "scenario": scenario,
+                "language": language,
+                "product_code": product_code,
+                "scenario_mode": scenario_mode,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
 
-    if st.session_state.last_simulation_key != simulation_key:
-        st.session_state.chat_messages = []
-        st.session_state.last_simulation_key = simulation_key
+        if st.session_state.last_simulation_key != simulation_key:
+            st.session_state.chat_messages = []
+            st.session_state.last_simulation_key = simulation_key
 
-    with st.spinner("ワンコサポートが結果をまとめています..."):
-        explanation = generate_result_explanation(result, language)
+        with st.spinner("ワンコサポートが結果をまとめています..."):
+            explanation = generate_result_explanation(result, language)
 
-    st.session_state.chat_messages.append(
-        {"role": "assistant", "content": explanation}
-    )
+        st.session_state.chat_messages.append(
+            {"role": "assistant", "content": explanation}
+        )
 
-# -----------------------------
-# Result area
-# -----------------------------
 if st.session_state.result is not None:
     result = st.session_state.result
     summary = result["summary"]
+    result_input = result["input"]
     df = pd.DataFrame(result["yearly_rows"])
 
     display_df = df.copy()
@@ -567,16 +596,32 @@ if st.session_state.result is not None:
 
         st.markdown('</div>', unsafe_allow_html=True)
 
+        st.markdown('<div class="soft-card">', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">計算基準</div>', unsafe_allow_html=True)
+        st.write(f"**商品**: {result_input['product_label']}")
+        st.write(f"**基準商品**: {result_input['benchmark_ticker']}")
+        st.write(f"**データ期間**: 直近 {result_input['period_years']} 年")
+        st.write(f"**計算方式**: {result_input['calculation_method']}")
+        st.info(result_input["warning_note"])
+        st.markdown('</div>', unsafe_allow_html=True)
+
     with right:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         st.markdown('<div class="section-title">資産の推移グラフ</div>', unsafe_allow_html=True)
         st.caption("元本と資産額の推移を確認できます。")
-        chart = create_asset_chart(df)
+        chart = create_asset_chart(
+            df,
+            result_input["product_label"],
+            {
+                "bull": "上昇相場",
+                "base": "平均",
+                "bear": "下落相場",
+            }[result_input["scenario"]],
+        )
         st.plotly_chart(chart, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<hr class="pretty">', unsafe_allow_html=True)
-
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 
     intro_html = '<div class="qa-header">'
@@ -587,7 +632,7 @@ if st.session_state.result is not None:
             <div class="chat-title">ワンコサポートチャット</div>
             <div class="ai-intro-box">
                 <div class="small-note">
-                    シミュレーション結果の意味、利益の見方、NISA枠の確認などを続けて質問できます。<br>
+                    シミュレーション結果の意味、利益の見方、NISA枠の確認、基準商品の意味などを続けて質問できます。<br>
                     やさしく、わかりやすく答えます。
                 </div>
             </div>
@@ -606,7 +651,7 @@ if st.session_state.result is not None:
             with st.chat_message("user"):
                 st.write(message["content"])
 
-    user_question = st.chat_input("たとえば「利益とは何ですか？」のように入力してください")
+    user_question = st.chat_input("たとえば「SPYとは何ですか？」のように入力してください")
 
     if user_question:
         st.session_state.chat_messages.append(
